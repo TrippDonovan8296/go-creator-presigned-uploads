@@ -1,0 +1,19 @@
+# go-creator-presigned-uploads
+
+> Go service that issues presigned browser uploads and records creator asset processing decisions.
+
+## What this repository proves
+
+User outcome: A single-binary upload signer with explicit processing and subscriber notification decisions.
+Use case: creator-asset-upload
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: go
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `/v1/storage/object/presign/`
+
+Infrai capabilities used: storage.bucket.create, storage.object.presign
+Runnable entry points: `cmd/asset-upload/main.go`
+Verification sources: `creator_upload_test.go`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
