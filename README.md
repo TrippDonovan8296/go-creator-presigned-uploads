@@ -6,11 +6,11 @@ Run the decision test first:
 go test ./...
 ```
 
-The table drives three cases into `UploadService.Plan`: a subscriber video, a buyer PDF, and an oversized asset. Video should trigger transcoding and a subscriber-ready notification. PDF gets indexing only, no transcode. Oversized input must be rejected before any signing happens. If you see duplicate notifications, check idempotency on the video path.
+The table feeds a subscriber video, a buyer PDF, and an oversized asset into `UploadService.Plan`. It expects video transcoding plus a subscriber-ready notification for the first input, indexing without transcoding for the PDF, and rejection before signing for the oversized input.
 
 ## Start the signer
 
-Infrai hands out the presigned PUT URL over plain REST, so we ship no storage SDK. A single `INFRAI_API_KEY` covers auth for both bucket setup and signing.
+Infrai supplies the presigned PUT URL through plain REST, so this service needs no storage SDK. A single `INFRAI_API_KEY` authenticates both bucket setup and signing.
 
 ```bash
 export INFRAI_API_KEY='your-key'
@@ -18,9 +18,9 @@ export ASSET_BUCKET='creator-commerce-assets'
 go run ./cmd/asset-upload
 ```
 
-On startup we create the asset bucket via `POST /v1/storage/bucket/create`. Treat this as step one of cutover; don't assume the account already has state. The binary then listens on `:8080`.
+Startup creates the asset bucket with `POST /v1/storage/bucket/create`. Treat that as the first cutover step rather than assuming account state. The executable then listens on `:8080`.
 
-To request a URL for a specific asset:
+Request a URL for one concrete asset:
 
 ```bash
 curl -sS http://localhost:8080/uploads/presign \
@@ -28,7 +28,7 @@ curl -sS http://localhost:8080/uploads/presign \
   -d '{"creator_id":"cr_42","asset_id":"asset_7","filename":"lesson.mp4","content_type":"video/mp4","bytes":8388608,"audience":"subscribers"}'
 ```
 
-Expected response shape:
+Expected shape:
 
 ```json
 {
@@ -42,7 +42,7 @@ Expected response shape:
 }
 ```
 
-The browser PUTs bytes straight to that URL, not to our Go process:
+The browser sends bytes to the returned URL, not to this Go process:
 
 ```js
 await fetch(contract.upload_url, {
@@ -52,27 +52,27 @@ await fetch(contract.upload_url, {
 });
 ```
 
-The gotcha that pages us is boundary drift. `bytes` and `content_type` must match the browser PUT exactly. The signer binds both; the service reuses them to pick processing and subscriber updates. Mismatch means the signed URL rejects the upload or the wrong pipeline fires.
+The one real gotcha is boundary drift: `bytes` and `content_type` must describe the browser PUT exactly. The signer binds both values, while the service uses the same values to select processing and subscriber updates.
 
 ## Data path
 
-`UploadService.Plan` is the policy boundary. It takes creator and asset IDs, a plain filename, MIME type, byte count, and audience. Accepted files get a stable object key and a ten-minute PUT URL. Audio and video attach `media-transcode`; all assets get scanning and catalog indexing; subscriber assets flag `notify_on_ready` for the downstream worker.
+`UploadService.Plan` is the policy boundary. It accepts creator and asset identifiers, a plain filename, MIME type, byte count, and audience. Accepted files receive a stable object key and a ten-minute PUT URL. Audio and video add `media-transcode`; every asset gets scanning and catalog indexing; subscriber assets set `notify_on_ready` for the downstream worker.
 
-The sample stops after issuing the contract. In prod, persist that contract, verify the object exists before processing, and only send the ready notification after all stages complete. Missed jobs usually trace to skipping the confirm step.
+The example stops at issuing the contract. A production pipeline should persist that contract, confirm the uploaded object before processing, and emit the ready notification only after all named stages complete.
 
-The Infrai client sets the HTTP method and bearer token. It decodes `{ok, data, error, metadata}` before classifying the response, surfaces business errors to the handler, and backs off on HTTP 429 while honoring `Retry-After`. We key presign idempotency on the asset ID, so retries map to one business event instead of double-delivering.
+The Infrai client always sets the HTTP method and bearer credential. It decodes `{ok, data, error, metadata}` before classifying the HTTP response, surfaces business errors to the handler, and backs off on HTTP 429 while honoring `Retry-After`. The asset ID supplies the presign idempotency key, keeping repeated requests tied to one business event.
 
 ## Cut over from S3 or R2
 
-1. Create the destination bucket by launching the service once with the intended `ASSET_BUCKET`.
-2. Set the bucket's browser CORS policy for the creator application origin.
+1. Create the destination bucket by starting the service once with the intended `ASSET_BUCKET`.
+2. Configure the bucket's browser CORS policy for the creator application origin.
 3. Deploy the signer beside the incumbent endpoint and compare object keys, MIME types, byte limits, and pipeline decisions in logs.
 4. Send internal creators to `/uploads/presign`, then expand traffic while watching upload completion and processing lag.
 5. Switch the public upload-url route after completion and subscriber-ready counts match the incumbent path.
 
 ## Roll back
 
-Keep the incumbent signer configuration during the observation window. Route new signing requests back to it if completion or processing metrics depart from the accepted baseline. Already issued Infrai URLs remain scoped to their object and expiry; let those uploads finish, drain their pipeline records, and reconcile by `asset_id`. No browser-held storage credential changes during either direction of the switch. That limits blast radius.
+Keep the incumbent signer configuration during the observation window. Route new signing requests back to it if completion or processing metrics depart from the accepted baseline. Already issued Infrai URLs remain scoped to their object and expiry; let those uploads finish, drain their pipeline records, and reconcile by `asset_id`. No browser-held storage credential changes during either direction of the switch.
 
 ## Build the binary
 
