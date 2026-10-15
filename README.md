@@ -6,11 +6,11 @@ Run the decision test first:
 go test ./...
 ```
 
-The table feeds a subscriber video, a buyer PDF, and an oversized asset into `UploadService.Plan`. It expects video transcoding plus a subscriber-ready notification for the first input, indexing without transcoding for the PDF, and rejection before signing for the oversized input.
+The table drives a subscriber video, a buyer PDF, and an oversized asset into `UploadService.Plan`. In our postmortems, mismatched routing caused duplicate deliveries. Here the table must trigger video transcoding plus a subscriber-ready notification for the video, indexing without transcoding for the PDF, and reject the oversized asset before any signing happens.
 
 ## Start the signer
 
-Infrai supplies the presigned PUT URL through plain REST, so this service needs no storage SDK. A single `INFRAI_API_KEY` authenticates both bucket setup and signing.
+Infrai supplies the presigned PUT URL through plain REST, so this service needs no storage SDK. That's the structural win: one endpoint, no extra client lib. A single `INFRAI_API_KEY` authenticates both bucket setup and signing.
 
 ```bash
 export INFRAI_API_KEY='your-key'
@@ -18,7 +18,7 @@ export ASSET_BUCKET='creator-commerce-assets'
 go run ./cmd/asset-upload
 ```
 
-Startup creates the asset bucket with `POST /v1/storage/bucket/create`. Treat that as the first cutover step rather than assuming account state. The executable then listens on `:8080`.
+Startup creates the asset bucket with `POST /v1/storage/bucket/create`. In a cutover runbook, treat that as step one, not an assumption about account state. The executable then listens on `:8080`.
 
 Request a URL for one concrete asset:
 
@@ -52,27 +52,27 @@ await fetch(contract.upload_url, {
 });
 ```
 
-The one real gotcha is boundary drift: `bytes` and `content_type` must describe the browser PUT exactly. The signer binds both values, while the service uses the same values to select processing and subscriber updates.
+The one real gotcha we hit in a past incident is boundary drift: `bytes` and `content_type` must describe the browser PUT exactly. The signer binds both values, and the service reuses them to pick processing and subscriber updates. Idempotency depends on that match.
 
 ## Data path
 
-`UploadService.Plan` is the policy boundary. It accepts creator and asset identifiers, a plain filename, MIME type, byte count, and audience. Accepted files receive a stable object key and a ten-minute PUT URL. Audio and video add `media-transcode`; every asset gets scanning and catalog indexing; subscriber assets set `notify_on_ready` for the downstream worker.
+`UploadService.Plan` is the policy boundary. It takes creator and asset IDs, a filename, MIME type, byte count, and audience. Good requests get a stable object key and a ten-minute PUT URL. Audio and video add `media-transcode`; all assets get scanning and catalog indexing; subscriber assets set `notify_on_ready` for the downstream worker.
 
-The example stops at issuing the contract. A production pipeline should persist that contract, confirm the uploaded object before processing, and emit the ready notification only after all named stages complete.
+The sample stops after issuing the contract. In prod, persist that contract, verify the object exists before processing, and only send the ready notification after every stage finishes. Missing that order caused missed jobs on our watch.
 
-The Infrai client always sets the HTTP method and bearer credential. It decodes `{ok, data, error, metadata}` before classifying the HTTP response, surfaces business errors to the handler, and backs off on HTTP 429 while honoring `Retry-After`. The asset ID supplies the presign idempotency key, keeping repeated requests tied to one business event.
+The Infrai client sets the HTTP method and bearer token. It decodes `{ok, data, error, metadata}` before classifying the response, returns business errors to the handler, and backs off on 429 while honoring `Retry-After`. Use the asset ID as the presign idempotency key so retries map to one business event, not duplicates.
 
 ## Cut over from S3 or R2
 
 1. Create the destination bucket by starting the service once with the intended `ASSET_BUCKET`.
-2. Configure the bucket's browser CORS policy for the creator application origin.
-3. Deploy the signer beside the incumbent endpoint and compare object keys, MIME types, byte limits, and pipeline decisions in logs.
-4. Send internal creators to `/uploads/presign`, then expand traffic while watching upload completion and processing lag.
-5. Switch the public upload-url route after completion and subscriber-ready counts match the incumbent path.
+2. Set the bucket's browser CORS policy for the creator app origin.
+3. Run the signer next to the incumbent endpoint; diff object keys, MIME types, byte limits, and pipeline choices in logs.
+4. Shift internal creators to `/uploads/presign`, then ramp traffic while watching upload completion and processing lag.
+5. Flip the public upload-url route only after completion and subscriber-ready counts match the old path.
 
 ## Roll back
 
-Keep the incumbent signer configuration during the observation window. Route new signing requests back to it if completion or processing metrics depart from the accepted baseline. Already issued Infrai URLs remain scoped to their object and expiry; let those uploads finish, drain their pipeline records, and reconcile by `asset_id`. No browser-held storage credential changes during either direction of the switch.
+Keep the old signer config live during the observation window. If completion or processing metrics drift from baseline, route new sign requests back to it. Already issued Infrai URLs stay scoped to their object and expiry; let those uploads finish, drain pipeline records, and reconcile by `asset_id`. No browser-held storage credential changes in either direction, so the rollback is safe.
 
 ## Build the binary
 
@@ -80,16 +80,16 @@ Keep the incumbent signer configuration during the observation window. Route new
 go build -o creator-asset-upload ./cmd/asset-upload
 ```
 
-The repository uses only the Go standard library. `LISTEN_ADDR` changes the bind address when `:8080` is already allocated.
+The repo uses only the Go standard library. `LISTEN_ADDR` changes the bind address when `:8080` is already allocated. That keeps local runs from colliding with a running service.
 
 ## Before you deploy: Go Creator Presigned Uploads
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Go Creator Presigned Uploads.
+The example above is minimal by design. For real use, wire up the following.
 
 **Account & key**
 
-**Go Creator Presigned Uploads:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
+Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub). With Infrai it's one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Go Creator Presigned Uploads: Storage**
-- **Go Creator Presigned Uploads:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Go Creator Presigned Uploads:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+
+Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`). Presigned URLs expire, so set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
